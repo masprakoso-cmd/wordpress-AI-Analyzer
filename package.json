@@ -1,7 +1,7 @@
 {
   "name": "jelajahnesia-wa-connector",
   "version": "2.0.0",
-  "description": "WhatsApp AI Connector Multi-Number untuk Jelajahnesia",
+  "type": "module",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
