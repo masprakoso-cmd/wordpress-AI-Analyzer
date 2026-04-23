@@ -10,6 +10,7 @@ import pino from 'pino';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import qrcode from 'qrcode';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
@@ -29,14 +30,62 @@ const CONFIG = {
 
 const app = express();
 app.use(express.json());
+
 const connections = {};
+const qrCodes = {}; // simpan QR per nomor
 
-app.get('/', (req, res) => {
-  res.json({ service: 'Jelajahnesia WA Connector', connections: NUMBERS.map(n => ({ id: n.id, status: connections[n.id]?.status || 'disconnected' })) });
+// ── HALAMAN STATUS + QR CODE ─────────────────────────────────
+app.get('/', async (req, res) => {
+  let html = `
+  <html><head><meta charset="utf-8">
+  <meta http-equiv="refresh" content="15">
+  <title>Jelajahnesia WA Connector</title>
+  <style>
+    body{font-family:sans-serif;background:#0a0e1a;color:#e2e8f0;padding:30px}
+    h1{color:#f59e0b}h2{color:#94a3b8;font-size:14px}
+    .card{background:#111827;border:1px solid #1e2d45;border-radius:12px;padding:20px;margin:16px 0;display:inline-block;margin-right:20px;vertical-align:top}
+    .online{color:#10b981;font-weight:bold}.offline{color:#ef4444}.waiting{color:#f59e0b}
+    img{border-radius:8px}
+    .note{color:#64748b;font-size:12px;margin-top:8px}
+  </style></head>
+  <body>
+  <h1>Jelajahnesia AI Connector</h1>
+  <h2>Halaman ini auto-refresh setiap 15 detik</h2>`;
+
+  for (const n of NUMBERS) {
+    const status = connections[n.id]?.status || 'disconnected';
+    const statusClass = status === 'connected' ? 'online' : status === 'connecting' ? 'waiting' : 'offline';
+    const statusText  = status === 'connected' ? '✅ Terhubung' : status === 'connecting' ? '⏳ Menunggu Scan...' : '❌ Terputus';
+
+    html += `<div class="card">
+      <h2>${n.label}</h2>
+      <p class="${statusClass}">${statusText}</p>`;
+
+    if (qrCodes[n.id] && status !== 'connected') {
+      try {
+        const qrDataUrl = await qrcode.toDataURL(qrCodes[n.id]);
+        html += `<br><img src="${qrDataUrl}" width="250" height="250"><br>
+        <p class="note">Scan dengan WA nomor ${n.brand}</p>`;
+      } catch(e) {
+        html += `<p>QR tidak bisa ditampilkan</p>`;
+      }
+    }
+
+    html += `</div>`;
+  }
+
+  html += `</body></html>`;
+  res.send(html);
 });
-app.get('/health', (req, res) => res.json({ status: 'ok' }));
-app.listen(CONFIG.PORT, () => console.log(`Server berjalan di port ${CONFIG.PORT}`));
 
+app.get('/health', (req, res) => res.json({ status: 'ok' }));
+
+app.listen(CONFIG.PORT, () => {
+  console.log(`Server berjalan di port ${CONFIG.PORT}`);
+  console.log(`Buka URL Railway untuk lihat QR code\n`);
+});
+
+// ── START SEMUA KONEKSI ──────────────────────────────────────
 async function startAll() {
   for (const numConfig of NUMBERS) {
     await new Promise(r => setTimeout(r, 3000));
@@ -57,7 +106,7 @@ async function startWhatsApp(numConfig) {
   const sock = makeWASocket({
     version, auth: state,
     logger: pino({ level: 'silent' }),
-    printQRInTerminal: true,
+    printQRInTerminal: false,
     browser: [`Jelajahnesia-${brand}`, 'Chrome', '1.0'],
     markOnlineOnConnect: false,
   });
@@ -66,7 +115,11 @@ async function startWhatsApp(numConfig) {
   sock.ev.on('creds.update', saveCreds);
 
   sock.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
-    if (qr) console.log(`\n[${label}] SCAN QR CODE INI di WhatsApp -> Perangkat Tertaut\n`);
+    if (qr) {
+      qrCodes[id] = qr;
+      console.log(`[${label}] QR baru tersedia - buka URL Railway untuk scan`);
+    }
+
     if (connection === 'close') {
       connections[id].status = 'disconnected';
       const shouldReconnect = (lastDisconnect?.error instanceof Boom)
@@ -74,7 +127,12 @@ async function startWhatsApp(numConfig) {
       console.log(`[${label}] Terputus. Reconnect: ${shouldReconnect}`);
       if (shouldReconnect) setTimeout(() => startWhatsApp(numConfig), 5000);
     }
-    if (connection === 'open') { connections[id].status = 'connected'; console.log(`[${label}] Terhubung!`); }
+
+    if (connection === 'open') {
+      connections[id].status = 'connected';
+      delete qrCodes[id];
+      console.log(`[${label}] Terhubung!`);
+    }
   });
 
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
@@ -87,7 +145,9 @@ async function startWhatsApp(numConfig) {
         if (CONFIG.IGNORE_GROUPS && isGroup) continue;
         const body = msg.message?.conversation || msg.message?.extendedTextMessage?.text || msg.message?.imageMessage?.caption || null;
         if (!body || body.length < CONFIG.MIN_MESSAGE_LENGTH) continue;
-        const from = isGroup ? msg.key.participant?.replace('@s.whatsapp.net', '') : msg.key.remoteJid?.replace('@s.whatsapp.net', '');
+        const from = isGroup
+          ? msg.key.participant?.replace('@s.whatsapp.net', '')
+          : msg.key.remoteJid?.replace('@s.whatsapp.net', '');
         console.log(`[${label}] ${msg.pushName || from}: "${body.substring(0, 50)}"`);
         await axios.post(CONFIG.WP_WEBHOOK_URL, {
           id: msg.key.id, from, pushName: msg.pushName || '',
